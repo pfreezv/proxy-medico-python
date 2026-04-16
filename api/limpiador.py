@@ -6,7 +6,7 @@ import urllib.error
 
 def limpiar_informe_medico(texto_sucio):
     """
-    Procesamiento de texto basado en las reglas de limpieza definidas. 
+    Función de limpieza que extrae datos clave del texto bruto para enviarlos a la IA.
     """
     resultado = {
         "fecha_informe": "",
@@ -15,12 +15,12 @@ def limpiar_informe_medico(texto_sucio):
         "analitica": []
     }
 
-    # 1. Extraer fecha general del informe 
+    # 1. Extraer fecha general
     match_fecha = re.search(r'Fecha:\s*(\d{1,2}/\d{1,2}/\d{4},\s*\d{2}:\d{2}:\d{2})', texto_sucio)
     if match_fecha:
         resultado["fecha_informe"] = match_fecha.group(1)
 
-    # 2. SECCIÓN 1: HISTORIAL CLÍNICO 
+    # 2. SECCIÓN 1: HISTORIAL CLÍNICO
     if "=== SECCIÓN 1: HISTORIAL CLÍNICO ===" in texto_sucio:
         sec_hist = texto_sucio.split("=== SECCIÓN 1:")[1].split("=== SECCIÓN 2:")[0]
         lineas_hist = [l.strip() for l in sec_hist.split('\n') if l.strip()]
@@ -31,7 +31,7 @@ def limpiar_informe_medico(texto_sucio):
                     if not diagnostico.startswith("("): 
                         resultado["historial_clinico"].append({"Fecha": linea, "Diagnostico": diagnostico})
 
-    # 3. SECCIÓN 2: MEDICACIÓN ACTIVA 
+    # 3. SECCIÓN 2: MEDICACIÓN ACTIVA
     if "=== SECCIÓN 2: MEDICACIÓN ACTIVA ===" in texto_sucio:
         sec_med = texto_sucio.split("=== SECCIÓN 2: MEDICACIÓN ACTIVA ===")[1].split("=== SECCIÓN 3:")[0]
         lineas_med = [l.strip() for l in sec_med.split('\n') if l.strip() and l != "FECHA\tMEDICAMENTO"]
@@ -50,7 +50,7 @@ def limpiar_informe_medico(texto_sucio):
                 i += 3
             else: i += 1
 
-    # 4. SECCIÓN 3: ANALÍTICA 
+    # 4. SECCIÓN 3: ANALÍTICA
     if "=== SECCIÓN 3: ANALÍTICA ===" in texto_sucio:
         sec_ana = texto_sucio.split("=== SECCIÓN 3: ANALÍTICA ===")[1]
         lineas_ana = [l.strip() for l in sec_ana.split('\n') if l.strip()]
@@ -73,82 +73,44 @@ def limpiar_informe_medico(texto_sucio):
 
 def consultar_groq(datos_limpios, api_key):
     """
-    Envía los datos a Groq con el prompt de anestesiología.
+    Motor de Inteligencia Artificial con reglas de veracidad médica estrictas.
     """
     url = "https://api.groq.com/openai/v1/chat/completions"
     
+    # Prompt optimizado para evitar alucinaciones y seguir tus plantillas
     prompt_maestro = f"""
     Actúa como un médico Anestesiólogo experto en medicina preoperatoria. 
-    Transforma estos datos estructurados en el formato solicitado.
+    Tu objetivo es transcribir y organizar información REAL. Está TERMINANTEMENTE PROHIBIDO inventar datos.
 
-    ### DATOS DE ENTRADA:
+    ### DATOS DE ENTRADA (JSON):
     {json.dumps(datos_limpios, ensure_ascii=False)}
 
-    ### INSTRUCCIONES:
-    1. GENERAR INFORME TEXTUAL (Formato Valoracion Preanest.txt):
-       Sigue este orden: Edad, Peso, Talla, Alergias, Antecedentes Medicos/Quirurgicos, Analítica (Hb, HCT, Plaquetas, INR, TTPA, Creatinina, FG), Valoración ASA y Recomendaciones.
-       * IMPORTANTE: En la Analítica incluye siempre los valores numéricos encontrados en los datos de entrada.
-       * OBSERVACIONES: La primera línea debe ser "ASA: [X] / APTO: [SÍ/NO]", seguida de un salto de línea y el resto del análisis.
+    ### INSTRUCCIONES DE SEGURIDAD:
+    1. SINCERIDAD ABSOLUTA: Si un dato (Edad, Peso, Hb, etc.) no está en el JSON de entrada, escribe "No consta". No inventes valores.
+    2. ANALÍTICA: Solo rellena Hb, HCT, Plaquetas, INR, TTPA, Creatinina y FG si hay números explícitos.
+    3. REGLA DE ERROR: Si la entrada está vacía, responde: "ERROR: No se han detectado datos médicos válidos."
 
-    2. GENERAR JSON (Estructura Filler_2.json):
-       Crea un bloque JSON con la estructura: metadatos, configuracion y datos (alergias, antecedentes, exploracion, conclusiones, estadoFisico).
-
-    Responde de forma profesional. Primero el Informe de Texto y luego el bloque JSON.
+    ### TAREAS:
+    1. INFORME TEXTUAL (Formato Valoracion Preanest.txt):
+       - Primera línea: "ASA: [X] / APTO: [SÍ/NO/PENDIENTE DE DATOS]".
+       - Seguido de salto de línea y el resto del informe (Edad, Peso, Alergias, Antecedentes, Analítica, Recomendaciones).
+    2. JSON ESTRUCTURADO (Formato Filler_2.json):
+       - Genera el bloque JSON respetando metadatos, configuración y datos (alergias, antecedentes, exploracion, conclusiones, estadoFisico).
     """
     
     body = {
         "model": "llama-3.3-70b-versatile",
         "messages": [
-            {"role": "system", "content": "Eres un anestesiólogo experto que genera informes y JSON estructurado."},
+            {
+                "role": "system", 
+                "content": "Eres un anestesiólogo clínico estricto. Tu prioridad es la seguridad. Si el dato no está presente, no lo asumas ni lo inventes."
+            },
             {"role": "user", "content": prompt_maestro}
         ],
-        "temperature": 0.3
+        "temperature": 0.0  # Seguridad máxima: elimina la creatividad de la IA
     }
     
     req = urllib.request.Request(url, data=json.dumps(body).encode('utf-8'))
     req.add_header('Content-Type', 'application/json')
     req.add_header('Authorization', f'Bearer {api_key}')
-    # User-Agent para evitar el error 403 Forbidden
     req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
-    
-    try:
-        with urllib.request.urlopen(req) as response:
-            res_data = json.loads(response.read().decode('utf-8'))
-            return res_data['choices'][0]['message']['content']
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode('utf-8')
-        return f"Error Groq ({e.code}): {error_body}"
-    except Exception as e:
-        return f"Error inesperado: {str(e)}"
-
-class handler(BaseHTTPRequestHandler):
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
-        self.end_headers()
-
-    def do_POST(self):
-        content_length = int(self.headers.get('Content-Length', 0))
-        post_data = self.rfile.read(content_length)
-        
-        self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Content-type', 'application/json')
-        self.end_headers()
-        
-        try:
-            body = json.loads(post_data.decode('utf-8'))
-            # 1. Limpieza con Python 
-            datos_limpios = limpiar_informe_medico(body.get('text', ''))
-            # 2. Análisis con IA
-            analisis_ia = consultar_groq(datos_limpios, body.get('apiKey', ''))
-            
-            respuesta_final = {
-                "datos_estructurados": datos_limpios,
-                "analisis_ia": analisis_ia
-            }
-            self.wfile.write(json.dumps(respuesta_final, indent=2, ensure_ascii=False).encode('utf-8'))
-        except Exception as e:
-            self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
