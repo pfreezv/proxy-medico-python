@@ -2,43 +2,101 @@ from http.server import BaseHTTPRequestHandler
 import json
 import re
 import urllib.request
-import os
 
 def limpiar_informe_medico(texto_sucio):
-    # ... (AQUÍ VA TU FUNCIÓN DE LIMPIEZA EXACTAMENTE COMO LA TENÍAS) ...
-    # (Para ahorrar espacio no la pego entera, pero mantenla arriba de todo)
     resultado = {
         "fecha_informe": "",
         "historial_clinico": [],
         "medicacion": [],
         "analitica": []
     }
-    # ... (todo tu código de re.search, split, etc.) ...
-    return resultado # IMPORTANTE: Ahora devolvemos el DICCIONARIO, no el JSON.
 
-def consultar_llm(datos_limpios, api_key):
+    # 1. Extraer fecha general
+    match_fecha = re.search(r'Fecha:\s*(\d{1,2}/\d{1,2}/\d{4},\s*\d{2}:\d{2}:\d{2})', texto_sucio)
+    if match_fecha:
+        resultado["fecha_informe"] = match_fecha.group(1)
+
+    # 2. SECCIÓN 1: HISTORIAL CLÍNICO
+    if "=== SECCIÓN 1: HISTORIAL CLÍNICO ===" in texto_sucio:
+        sec_hist = texto_sucio.split("=== SECCIÓN 1:")[1].split("=== SECCIÓN 2:")[0]
+        lineas_hist = [l.strip() for l in sec_hist.split('\n') if l.strip()]
+        for i, linea in enumerate(lineas_hist):
+            if re.match(r'^\d{2}/\d{2}/\d{4}', linea):
+                if i + 1 < len(lineas_hist):
+                    diagnostico = lineas_hist[i+1]
+                    if not diagnostico.startswith("("): 
+                        resultado["historial_clinico"].append({"Fecha": linea, "Diagnostico": diagnostico})
+
+    # 3. SECCIÓN 2: MEDICACIÓN ACTIVA
+    if "=== SECCIÓN 2: MEDICACIÓN ACTIVA ===" in texto_sucio:
+        sec_med = texto_sucio.split("=== SECCIÓN 2: MEDICACIÓN ACTIVA ===")[1].split("=== SECCIÓN 3:")[0]
+        lineas_med = [l.strip() for l in sec_med.split('\n') if l.strip() and l != "FECHA\tMEDICAMENTO"]
+        i = 0
+        while i < len(lineas_med):
+            linea = lineas_med[i]
+            if any(k in linea for k in ["MG", "AMP", "SOL", "ML", "UI"]):
+                partes = linea.split('\t')
+                farmaco = partes[0].strip()
+                dosis = partes[1].strip() if len(partes) > 1 else ""
+                resultado["medicacion"].append({
+                    "Farmaco": farmaco, "Dosis": dosis,
+                    "Unidad": lineas_med[i+1] if i+1 < len(lineas_med) else "",
+                    "Frecuencia": lineas_med[i+2] if i+2 < len(lineas_med) else ""
+                })
+                i += 3
+            else: i += 1
+
+    # 4. SECCIÓN 3: ANALÍTICA
+    if "=== SECCIÓN 3: ANALÍTICA ===" in texto_sucio:
+        sec_ana = texto_sucio.split("=== SECCIÓN 3: ANALÍTICA ===")[1]
+        lineas_ana = [l.strip() for l in sec_ana.split('\n') if l.strip()]
+        ruido = ["BIOQUIMICA GENERAL", "HEMATIMETRIA", "HEMOSTASIA", "Procedencia", "HELL - URGENCIAS", "URL:"]
+        prueba_actual = None
+        for linea in lineas_ana:
+            if any(r in linea for r in ruido) or linea.startswith("http") or re.match(r'^Fecha:', linea): continue
+            if ":" in linea:
+                if prueba_actual: resultado["analitica"].append(prueba_actual)
+                prueba_actual = {"Prueba": linea.split(":")[0].strip(), "Valor": "", "Rango": "", "Unidad": ""}
+            elif re.match(r'^[><]?\d+([,.]\d+)?$', linea) and prueba_actual:
+                prueba_actual["Valor"] = linea
+            elif re.match(r'^[\d,.]+\s*-\s*[\d,.]+$', linea) and prueba_actual:
+                prueba_actual["Rango"] = linea
+            elif prueba_actual and len(linea) < 15 and not re.match(r'^[><]?\d', linea):
+                prueba_actual["Unidad"] = linea
+        if prueba_actual: resultado["analitica"].append(prueba_actual)
+
+    return resultado
+
+def consultar_groq(datos_limpios, api_key):
     url = "https://api.groq.com/openai/v1/chat/completions"
     
-    # Preparamos la pregunta para la IA
-    prompt = f"""
-    Actúa como un médico experto. He extraído estos datos de un informe:
+    # NUEVO PROMPT MAESTRO BASADO EN TUS ARCHIVOS
+    prompt_maestro = f"""
+    Actúa como un médico Anestesiólogo experto en medicina preoperatoria. 
+    Transforma estos datos estructurados en el formato solicitado.
+
+    ### DATOS DE ENTRADA:
     {json.dumps(datos_limpios, ensure_ascii=False)}
-    
-    Por favor, analiza la información y proporciona:
-    1. Un resumen ejecutivo de la situación (2 frases).
-    2. Alertas si hay valores de analítica fuera de rango.
-    3. Una breve observación sobre la medicación actual.
-    
-    Responde de forma profesional y concisa.
+
+    ### INSTRUCCIONES:
+    1. GENERAR INFORME TEXTUAL:
+       Sigue el formato de 'Valoracion Preanest.txt': Edad, Peso, Talla, Alergias, Antecedentes, Analítica (Hb, HCT, Plaquetas, INR, TTPA, Creatinina, FG), Valoración ASA y Recomendaciones.
+       * IMPORTANTE: En la Analítica incluye siempre los valores numéricos encontrados.
+       * OBSERVACIONES: La primera línea debe ser "ASA: [X] / APTO: [SÍ/NO]", seguida de un salto de línea y el resto del análisis.
+
+    2. GENERAR JSON (Filler_2.json):
+       Crea un bloque JSON con la estructura: filiacion, antecedentes (listas), exploracion (cardiovascular/ECG, respiratorio/Rx), conclusiones.
+
+    Responde de forma profesional. Primero el Informe de Texto y luego el bloque JSON.
     """
     
     body = {
-        "model": "llama-3.3-70b-versatile", # El modelo más potente de Groq
+        "model": "llama-3.3-70b-versatile",
         "messages": [
-            {"role": "system", "content": "Eres un asistente médico experto en análisis de datos estructurados."},
-            {"role": "user", "content": prompt}
+            {"role": "system", "content": "Eres un anestesiólogo experto que genera informes y JSON estructurado."},
+            {"role": "user", "content": prompt_maestro}
         ],
-        "temperature": 0.5
+        "temperature": 0.3
     }
     
     req = urllib.request.Request(url, data=json.dumps(body).encode('utf-8'))
@@ -50,7 +108,7 @@ def consultar_llm(datos_limpios, api_key):
             res_data = json.loads(response.read().decode('utf-8'))
             return res_data['choices'][0]['message']['content']
     except Exception as e:
-        return f"Error al consultar Groq: {str(e)}"
+        return f"Error en Groq: {str(e)}"
 
 class handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
@@ -63,7 +121,6 @@ class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length)
-        
         self.send_response(200)
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Content-type', 'application/json')
@@ -71,23 +128,13 @@ class handler(BaseHTTPRequestHandler):
         
         try:
             body = json.loads(post_data.decode('utf-8'))
-            texto_sucio = body.get('text', '')
+            datos_limpios = limpiar_informe_medico(body.get('text', ''))
+            analisis_ia = consultar_groq(datos_limpios, body.get('apiKey', ''))
             
-            # 1. Limpiamos con tu lógica de Python
-            datos_limpios = limpiar_informe_medico(texto_sucio)
-            
-            # 2. Consultamos a Groq (usando la key que enviaremos desde la extensión o Vercel)
-            # Para esta prueba, la recibiremos en el body desde la extensión
-            api_key = body.get('apiKey', '')
-            analisis_ia = consultar_llm(datos_limpios, api_key)
-            
-            # 3. Devolvemos TODO: los datos limpios + el análisis de la IA
             respuesta_final = {
                 "datos_estructurados": datos_limpios,
                 "analisis_ia": analisis_ia
             }
-            
             self.wfile.write(json.dumps(respuesta_final, indent=2, ensure_ascii=False).encode('utf-8'))
-            
         except Exception as e:
             self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
