@@ -30,7 +30,7 @@ def limpiar_informe_medico(texto_sucio):
                             "Diagnostico": diagnostico
                         })
 
-    # 3. SECCIÓN 2: MEDICACIÓN ACTIVA
+    # 3. SECCIÓN 2: MEDICACIÓN ACTIVA (TU CORRECCIÓN)
     if "=== SECCIÓN 2: MEDICACIÓN ACTIVA ===" in texto_sucio:
         sec_med = texto_sucio.split("=== SECCIÓN 2: MEDICACIÓN ACTIVA ===")[1].split("=== SECCIÓN 3:")[0]
         lineas_med = [l.strip() for l in sec_med.split('\n') if l.strip() and l != "FECHA\tMEDICAMENTO"]
@@ -38,18 +38,23 @@ def limpiar_informe_medico(texto_sucio):
         i = 0
         while i < len(lineas_med):
             linea = lineas_med[i]
-            if any(k in linea for k in ["MG", "AMP", "SOL", "ML"]):
+            if any(k in linea for k in ["MG", "AMP", "SOL", "ML", "UI"]):
+                # Separamos el nombre de la dosis numérica que vienen en la misma línea
+                partes = linea.split('\t')
+                farmaco = partes[0].strip()
+                dosis = partes[1].strip() if len(partes) > 1 else ""
+                
                 resultado["medicacion"].append({
-                    "Farmaco": linea.split('\t')[0], 
-                    "Dosis": lineas_med[i+1] if i+1 < len(lineas_med) else "",
-                    "Unidad": lineas_med[i+2] if i+2 < len(lineas_med) else "",
-                    "Frecuencia": lineas_med[i+3] if i+3 < len(lineas_med) else ""
+                    "Farmaco": farmaco,
+                    "Dosis": dosis,
+                    "Unidad": lineas_med[i+1] if i+1 < len(lineas_med) else "",
+                    "Frecuencia": lineas_med[i+2] if i+2 < len(lineas_med) else ""
                 })
-                i += 4
+                i += 3 # Ahora saltamos de 3 en 3
             else:
                 i += 1
 
-    # 4. SECCIÓN 3: ANALÍTICA
+    # 4. SECCIÓN 3: ANALÍTICA (TU CORRECCIÓN)
     if "=== SECCIÓN 3: ANALÍTICA ===" in texto_sucio:
         sec_ana = texto_sucio.split("=== SECCIÓN 3: ANALÍTICA ===")[1]
         lineas_ana = [l.strip() for l in sec_ana.split('\n') if l.strip()]
@@ -58,7 +63,7 @@ def limpiar_informe_medico(texto_sucio):
                  "Procedencia", "HELL - URGENCIAS", "La información mostrada", "URL:"]
         
         prueba_actual = None
-        for i, linea in enumerate(lineas_ana):
+        for linea in lineas_ana:
             if any(r in linea for r in ruido) or linea.startswith("http") or re.match(r'^Fecha:', linea):
                 continue
                 
@@ -72,9 +77,9 @@ def limpiar_informe_medico(texto_sucio):
             elif re.match(r'^[\d,.]+\s*-\s*[\d,.]+$', linea) and prueba_actual:
                 prueba_actual["Rango"] = linea
             
-            elif prueba_actual and len(linea) < 15:
-                if i+1 < len(lineas_ana) and ":" not in lineas_ana[i+1]:
-                    prueba_actual["Unidad"] = linea
+            # Unidad: Cualquier línea corta que quede y no empiece por número
+            elif prueba_actual and len(linea) < 15 and not re.match(r'^[><]?\d', linea):
+                prueba_actual["Unidad"] = linea
 
         if prueba_actual: resultado["analitica"].append(prueba_actual)
 
@@ -100,10 +105,7 @@ class handler(BaseHTTPRequestHandler):
         try:
             body = json.loads(post_data.decode('utf-8'))
             texto_sucio = body.get('text', '')
-            
-            # Ejecutamos tu nueva lógica
             resultado_json = limpiar_informe_medico(texto_sucio)
-            
             self.wfile.write(resultado_json.encode('utf-8'))
         except Exception as e:
             self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
