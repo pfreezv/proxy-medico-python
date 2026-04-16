@@ -77,7 +77,7 @@ def consultar_groq(datos_limpios, api_key):
     """
     url = "https://api.groq.com/openai/v1/chat/completions"
     
-    # Prompt optimizado para evitar alucinaciones y seguir tus plantillas
+    # Prompt optimizado para evitar alucinaciones y seguir tus plantillas 
     prompt_maestro = f"""
     Actúa como un médico Anestesiólogo experto en medicina preoperatoria. 
     Tu objetivo es transcribir y organizar información REAL. Está TERMINANTEMENTE PROHIBIDO inventar datos.
@@ -114,3 +114,44 @@ def consultar_groq(datos_limpios, api_key):
     req.add_header('Content-Type', 'application/json')
     req.add_header('Authorization', f'Bearer {api_key}')
     req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+    
+    try:
+        with urllib.request.urlopen(req) as response:
+            res_data = json.loads(response.read().decode('utf-8'))
+            return res_data['choices'][0]['message']['content']
+    except urllib.error.HTTPError as e:
+        return f"Error Groq ({e.code}): {e.read().decode('utf-8')}"
+    except Exception as e:
+        return f"Error inesperado: {str(e)}"
+
+class handler(BaseHTTPRequestHandler):
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+
+    def do_POST(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        post_data = self.rfile.read(content_length)
+        
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Content-type', 'application/json')
+        self.end_headers()
+        
+        try:
+            body = json.loads(post_data.decode('utf-8'))
+            # 1. Limpieza de Python
+            datos_limpios = limpiar_informe_medico(body.get('text', ''))
+            # 2. Procesamiento de IA con Temperatura 0
+            analisis_ia = consultar_groq(datos_limpios, body.get('apiKey', ''))
+            
+            respuesta_final = {
+                "datos_estructurados": datos_limpios,
+                "analisis_ia": analisis_ia
+            }
+            self.wfile.write(json.dumps(respuesta_final, indent=2, ensure_ascii=False).encode('utf-8'))
+        except Exception as e:
+            self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
