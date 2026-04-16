@@ -2,32 +2,83 @@ from http.server import BaseHTTPRequestHandler
 import json
 import re
 
-def limpiar_informe_medico(texto_bruto):
-    datos_limpios = {"analitica": [], "medicacion": []}
-    if "=== SECCIÓN 3: ANALÍTICA ===" in texto_bruto:
-        seccion_analitica = texto_bruto.split("=== SECCIÓN 3: ANALÍTICA ===")[1]
-        lineas = [linea.strip() for linea in seccion_analitica.split('\n') if linea.strip()]
-        prueba_actual = {}
-        for linea in lineas:
-            if linea.endswith(':'):
-                if prueba_actual: datos_limpios["analitica"].append(prueba_actual)
-                prueba_actual = {"Prueba": linea[:-1].strip()}
-            elif "Prueba" in prueba_actual:
-                if re.match(r'^[><]?\d+(?:,\d+)?$', linea): prueba_actual["Valor"] = linea
-                elif re.match(r'^[\d,]+\s*-\s*[\d,]+$', linea): prueba_actual["Rango"] = linea
-                elif re.match(r'^[a-zA-Z0-9/%^\.]+$', linea): prueba_actual["Unidad"] = linea
-        if prueba_actual: datos_limpios["analitica"].append(prueba_actual)
-    if "=== SECCIÓN 2: MEDICACIÓN ACTIVA ===" in texto_bruto:
-        seccion_med = texto_bruto.split("=== SECCIÓN 2: MEDICACIÓN ACTIVA ===")[1].split("=== SECCIÓN 3")[0]
-        lineas_med = [linea.strip() for linea in seccion_med.split('\n') if linea.strip()]
-        lineas_med = [l for l in lineas_med if l not in ["FECHA\tMEDICAMENTO", "FECHA MEDICAMENTO"]]
-        for i in range(0, len(lineas_med), 4):
-            if i + 3 < len(lineas_med):
-                datos_limpios["medicacion"].append({
-                    "Farmaco": lineas_med[i], "Dosis": lineas_med[i+1],
-                    "Unidad": lineas_med[i+2], "Frecuencia": lineas_med[i+3]
+def limpiar_informe_medico(texto_sucio):
+    resultado = {
+        "fecha_informe": "",
+        "historial_clinico": [],
+        "medicacion": [],
+        "analitica": []
+    }
+
+    # 1. Extraer fecha general
+    match_fecha = re.search(r'Fecha:\s*(\d{1,2}/\d{1,2}/\d{4},\s*\d{2}:\d{2}:\d{2})', texto_sucio)
+    if match_fecha:
+        resultado["fecha_informe"] = match_fecha.group(1)
+
+    # 2. SECCIÓN 1: HISTORIAL CLÍNICO
+    if "=== SECCIÓN 1: HISTORIAL CLÍNICO ===" in texto_sucio:
+        sec_hist = texto_sucio.split("=== SECCIÓN 1:")[1].split("=== SECCIÓN 2:")[0]
+        lineas_hist = [l.strip() for l in sec_hist.split('\n') if l.strip()]
+        
+        for i, linea in enumerate(lineas_hist):
+            if re.match(r'^\d{2}/\d{2}/\d{4}', linea):
+                if i + 1 < len(lineas_hist):
+                    diagnostico = lineas_hist[i+1]
+                    if not diagnostico.startswith("("): 
+                        resultado["historial_clinico"].append({
+                            "Fecha": linea,
+                            "Diagnostico": diagnostico
+                        })
+
+    # 3. SECCIÓN 2: MEDICACIÓN ACTIVA
+    if "=== SECCIÓN 2: MEDICACIÓN ACTIVA ===" in texto_sucio:
+        sec_med = texto_sucio.split("=== SECCIÓN 2: MEDICACIÓN ACTIVA ===")[1].split("=== SECCIÓN 3:")[0]
+        lineas_med = [l.strip() for l in sec_med.split('\n') if l.strip() and l != "FECHA\tMEDICAMENTO"]
+        
+        i = 0
+        while i < len(lineas_med):
+            linea = lineas_med[i]
+            if any(k in linea for k in ["MG", "AMP", "SOL", "ML"]):
+                resultado["medicacion"].append({
+                    "Farmaco": linea.split('\t')[0], 
+                    "Dosis": lineas_med[i+1] if i+1 < len(lineas_med) else "",
+                    "Unidad": lineas_med[i+2] if i+2 < len(lineas_med) else "",
+                    "Frecuencia": lineas_med[i+3] if i+3 < len(lineas_med) else ""
                 })
-    return json.dumps(datos_limpios, indent=4, ensure_ascii=False)
+                i += 4
+            else:
+                i += 1
+
+    # 4. SECCIÓN 3: ANALÍTICA
+    if "=== SECCIÓN 3: ANALÍTICA ===" in texto_sucio:
+        sec_ana = texto_sucio.split("=== SECCIÓN 3: ANALÍTICA ===")[1]
+        lineas_ana = [l.strip() for l in sec_ana.split('\n') if l.strip()]
+        
+        ruido = ["BIOQUIMICA GENERAL", "HEMATIMETRIA", "HEMOSTASIA", 
+                 "Procedencia", "HELL - URGENCIAS", "La información mostrada", "URL:"]
+        
+        prueba_actual = None
+        for i, linea in enumerate(lineas_ana):
+            if any(r in linea for r in ruido) or linea.startswith("http") or re.match(r'^Fecha:', linea):
+                continue
+                
+            if ":" in linea:
+                if prueba_actual: resultado["analitica"].append(prueba_actual)
+                prueba_actual = {"Prueba": linea.split(":")[0].strip(), "Valor": "", "Rango": "", "Unidad": ""}
+            
+            elif re.match(r'^[><]?\d+([,.]\d+)?$', linea) and prueba_actual:
+                prueba_actual["Valor"] = linea
+            
+            elif re.match(r'^[\d,.]+\s*-\s*[\d,.]+$', linea) and prueba_actual:
+                prueba_actual["Rango"] = linea
+            
+            elif prueba_actual and len(linea) < 15:
+                if i+1 < len(lineas_ana) and ":" not in lineas_ana[i+1]:
+                    prueba_actual["Unidad"] = linea
+
+        if prueba_actual: resultado["analitica"].append(prueba_actual)
+
+    return json.dumps(resultado, indent=2, ensure_ascii=False)
 
 class handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
@@ -40,13 +91,19 @@ class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length)
+        
         self.send_response(200)
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Content-type', 'application/json')
         self.end_headers()
+        
         try:
             body = json.loads(post_data.decode('utf-8'))
-            resultado_json = limpiar_informe_medico(body.get('text', ''))
+            texto_sucio = body.get('text', '')
+            
+            # Ejecutamos tu nueva lógica
+            resultado_json = limpiar_informe_medico(texto_sucio)
+            
             self.wfile.write(resultado_json.encode('utf-8'))
         except Exception as e:
             self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
